@@ -2,9 +2,9 @@ name: luci-app-passwall CI
 on:
   release:
     types: [published]
-  push:
-    branches:
-      - master
+  #push:
+    #branches:
+      #- master
     paths:
       - 'Makefile'
 jobs:
