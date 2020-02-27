@@ -116,24 +116,6 @@ get_not_exists_port_after() {
 	fi
 }
 
-set_subscribe_proxy() {
-	local enabled
-	local url
-	config_get enabled $1 enabled
-	config_get url $1 url
-	[ "$enabled" == "1" ] && {
-		[ -n "$url" -a "$url" != "" ] && {
-			if [ -n "$(echo -n "$url" | grep "//")" ]; then
-				echo -n "$url" | awk -F'/' '{print $3}' | sed "s/^/server=&\/./g" | sed "s/$/\/127.0.0.1#$DNS_PORT/g" >>$TMP_DNSMASQ_PATH/subscribe.conf
-				echo -n "$url" | awk -F'/' '{print $3}' | sed "s/^/ipset=&\/./g" | sed "s/$/\/router/g" >>$TMP_DNSMASQ_PATH/subscribe.conf
-			else
-				echo -n "$url" | awk -F'/' '{print $1}' | sed "s/^/server=&\/./g" | sed "s/$/\/127.0.0.1#$DNS_PORT/g" >>$TMP_DNSMASQ_PATH/subscribe.conf
-				echo -n "$url" | awk -F'/' '{print $1}' | sed "s/^/ipset=&\/./g" | sed "s/$/\/router/g" >>$TMP_DNSMASQ_PATH/subscribe.conf
-			fi
-		}
-	}
-}
-
 ln_start_bin() {
 	local file=$1
 	local bin=$2
@@ -201,22 +183,27 @@ load_config() {
 	[ "$LOCALHOST_PROXY_MODE" == "default" ] && LOCALHOST_PROXY_MODE=$PROXY_MODE
 	UP_CHINA_DNS=$(config_t_get global up_china_dns dnsbyisp)
 	wangejibadns=$(config_t_get global_other wangejibadns 0)
-	[ "$wangejibadns" == "0" ] && {
-		UP_CHINA_DNS="default"
-		[ "$DNS_MODE" == "chinadns-ng" ] && DNS_MODE="pdnsd" && use_udp_node_resolve_dns=0
-	}
+	[ "$wangejibadns" == "0" ] && UP_CHINA_DNS="default"
 	[ "$UP_CHINA_DNS" == "default" ] && IS_DEFAULT_CHINA_DNS=1
 	[ ! -f "$RESOLVFILE" -o ! -s "$RESOLVFILE" ] && RESOLVFILE=/tmp/resolv.conf.auto
-	[ "$UP_CHINA_DNS" == "dnsbyisp" -o "$UP_CHINA_DNS" == "default" ] && {
-		local dns1=$(cat $RESOLVFILE 2>/dev/null | grep -E -o "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | grep -v 0.0.0.0 | grep -v 127.0.0.1 | sed -n '1P')
-		if [ -n "$dns1" ]; then
-			UP_CHINA_DNS=$dns1
+	if [ "$UP_CHINA_DNS" == "dnsbyisp" -o "$UP_CHINA_DNS" == "default" ]; then
+		UP_CHINA_DNS1=$(cat $RESOLVFILE 2>/dev/null | grep -E -o "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | grep -v 0.0.0.0 | grep -v 127.0.0.1 | sed -n '1P')
+		if [ -n "$UP_CHINA_DNS1" ]; then
+			UP_CHINA_DNS=$UP_CHINA_DNS1
 		else
 			UP_CHINA_DNS="223.5.5.5"
 		fi
-		local dns2=$(cat $RESOLVFILE 2>/dev/null | grep -E -o "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | grep -v 0.0.0.0 | grep -v 127.0.0.1 | sed -n '2P')
-		[ -n "$dns1" -a -n "$dns2" ] && UP_CHINA_DNS="$dns1,$dns2"
-	}
+		local UP_CHINA_DNS2=$(cat $RESOLVFILE 2>/dev/null | grep -E -o "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | grep -v 0.0.0.0 | grep -v 127.0.0.1 | sed -n '2P')
+		[ -n "$UP_CHINA_DNS1" -a -n "$UP_CHINA_DNS2" ] && UP_CHINA_DNS="$UP_CHINA_DNS1,$UP_CHINA_DNS2"
+	else
+		UP_CHINA_DNS1=$(echo $UP_CHINA_DNS | awk -F ',' '{print $1}')
+		if [ -n "$UP_CHINA_DNS1" ]; then
+			UP_CHINA_DNS2=$(echo $UP_CHINA_DNS | awk -F ',' '{print $2}')
+			[ -n "$UP_CHINA_DNS2" ] && UP_CHINA_DNS="${UP_CHINA_DNS1},${UP_CHINA_DNS2}"
+		else
+			UP_CHINA_DNS="223.5.5.5"
+		fi
+	fi
 	TCP_REDIR_PORT1=$(config_t_get global_forwarding tcp_redir_port 1041)
 	TCP_REDIR_PORT2=$(expr $TCP_REDIR_PORT1 + 1)
 	TCP_REDIR_PORT3=$(expr $TCP_REDIR_PORT2 + 1)
@@ -228,8 +215,6 @@ load_config() {
 	SOCKS5_PROXY_PORT3=$(expr $SOCKS5_PROXY_PORT2 + 1)
 	PROXY_IPV6=$(config_t_get global_forwarding proxy_ipv6 0)
 	mkdir -p /var/etc $CONFIG_PATH $RUN_BIN_PATH $RUN_ID_PATH
-	
-	config_load $CONFIG
 	return 0
 }
 
@@ -245,13 +230,11 @@ gen_ss_ssr_config_file() {
 	encrypt_method=$(config_n_get $node ss_encrypt_method)
 	[ "$type" == "ssr" ] && encrypt_method=$(config_n_get $node ssr_encrypt_method)
 	[ "$kcptun" == "1" ] && {
-		server_ip=127.0.0.1
 		server_host=127.0.0.1
 		port=$KCPTUN_REDIR_PORT
 	}
 	cat <<-EOF >$configfile
 		{
-		    "_comment": "$server_ip",
 		    "server": "$server_host",
 		    "server_port": $port,
 		    "local_address": "0.0.0.0",
@@ -274,7 +257,7 @@ gen_ss_ssr_config_file() {
 }
 
 gen_start_config() {
-	local node local_port redir_type config_file server_host server_ip port type use_ipv6 network_type
+	local node local_port redir_type config_file server_host port type
 	node=$1
 	local_port=$2
 	redir_type=$3
@@ -283,20 +266,9 @@ gen_start_config() {
 	remarks=$(config_n_get $node remarks)
 	server_host=$(config_n_get $node address)
 	port=$(config_n_get $node port)
-	[ -n "$server_host" -a -n "$port" ] && {
-		use_ipv6=$(config_n_get $node use_ipv6)
-		network_type="ipv4"
-		[ "$use_ipv6" == "1" ] && network_type="ipv6"
-		server_ip=$(get_host_ip $network_type $server_host)
-		echolog "$redir_type节点：$remarks，节点：${server_ip}:${port}，监听端口：$local_port"
-	}
+	[ -n "$server_host" -a -n "$port" ] && echolog "$redir_type节点：$remarks，节点：${server_host}:${port}，监听端口：$local_port"
 
 	if [ "$redir_type" == "SOCKS5" ]; then
-		if [ "$network_type" == "ipv6" ]; then
-			eval SOCKS5_NODE${5}_IPV6=$server_ip
-		else
-			eval SOCKS5_NODE${5}_IP=$server_ip
-		fi
 		eval SOCKS5_NODE${5}_PORT=$port
 		if [ "$type" == "socks5" ]; then
 			echolog "Socks5节点不能使用Socks5代理节点！"
@@ -307,7 +279,12 @@ gen_start_config() {
 			lua $API_GEN_TROJAN $node client "0.0.0.0" $local_port >$config_file
 			ln_start_bin $(find_bin trojan) trojan "-c $config_file"
 		elif [ "$type" == "brook" ]; then
-			ln_start_bin $(config_t_get global_app brook_file $(find_bin brook)) brook "client -l 0.0.0.0:$local_port -i 0.0.0.0 -s $server_ip:$port -p $(config_n_get $node password)"
+			local protocol=$(config_n_get $node brook_protocol client)
+			local brook_tls=$(config_n_get $node brook_tls 0)
+			[ "$protocol" == "wsclient" ] && {
+				[ "$brook_tls" == "1" ] && server_host="wss://${server_host}" || server_host="ws://${server_host}" 
+			}
+			ln_start_bin $(config_t_get global_app brook_file $(find_bin brook)) brook_socks_$5 "$protocol -l 0.0.0.0:$local_port -i 0.0.0.0 -s $server_host:$port -p $(config_n_get $node password)"
 		elif [ "$type" == "ssr" ]; then
 			gen_ss_ssr_config_file ssr $local_port 0 $node $config_file
 			ln_start_bin $(find_bin ssr-local) ssr-local "-c $config_file -b 0.0.0.0 -u"
@@ -326,11 +303,6 @@ gen_start_config() {
 	fi
 
 	if [ "$redir_type" == "UDP" ]; then
-		if [ "$network_type" == "ipv6" ]; then
-			eval UDP_NODE${5}_IPV6=$server_ip
-		else
-			eval UDP_NODE${5}_IP=$server_ip
-		fi
 		eval UDP_NODE${5}_PORT=$port
 		
 		if [ "$type" == "socks5" ]; then
@@ -339,7 +311,7 @@ gen_start_config() {
 			local server_username=$(config_n_get $node username)
 			local server_password=$(config_n_get $node password)
 			eval port=\$UDP_REDIR_PORT$5
-			ln_start_bin $(find_bin ipt2socks) ipt2socks "-U -l $port -b 0.0.0.0 -s $node_address -p $node_port -R"
+			ln_start_bin $(find_bin ipt2socks) ipt2socks_udp_$5 "-U -l $port -b 0.0.0.0 -s $node_address -p $node_port -R"
 			
 			# local redsocks_config_file=$CONFIG_PATH/UDP_$i.conf
 			# gen_redsocks_config $redsocks_config_file udp $port $node_address $node_port $server_username $server_password
@@ -359,13 +331,18 @@ gen_start_config() {
 			local server_username=$(config_n_get $node username)
 			local server_password=$(config_n_get $node password)
 			eval port=\$UDP_REDIR_PORT$5
-			ln_start_bin $(find_bin ipt2socks) ipt2socks "-U -l $port -b 0.0.0.0 -s 127.0.0.1 -p $socks5_port -R"
+			ln_start_bin $(find_bin ipt2socks) ipt2socks_udp_$5 "-U -l $port -b 0.0.0.0 -s 127.0.0.1 -p $socks5_port -R"
 				
 			# local redsocks_config_file=$CONFIG_PATH/redsocks_UDP_$i.conf
 			# gen_redsocks_config $redsocks_config_file udp $port "127.0.0.1" $socks5_port
 			# ln_start_bin $(find_bin redsocks2) redsocks2 "-c $redsocks_config_file"
 		elif [ "$type" == "brook" ]; then
-			ln_start_bin $(config_t_get global_app brook_file $(find_bin brook)) brook "tproxy -l 0.0.0.0:$local_port -s $server_ip:$port -p $(config_n_get $node password)"
+			local protocol=$(config_n_get $node brook_protocol client)
+			if [ "$protocol" == "wsclient" ]; then
+				echolog "Brook的WebSocket不支持UDP转发！"
+			else
+				ln_start_bin $(config_t_get global_app brook_file $(find_bin brook)) brook_udp_$5 "tproxy -l 0.0.0.0:$local_port -s $server_host:$port -p $(config_n_get $node password)"
+			fi
 		elif [ "$type" == "ssr" ]; then
 			gen_ss_ssr_config_file ssr $local_port 0 $node $config_file
 			ln_start_bin $(find_bin ssr-redir) ssr-redir "-c $config_file -U"
@@ -384,11 +361,6 @@ gen_start_config() {
 	fi
 
 	if [ "$redir_type" == "TCP" ]; then
-		if [ "$network_type" == "ipv6" ]; then
-			eval TCP_NODE${5}_IPV6=$server_ip
-		else
-			eval TCP_NODE${5}_IP=$server_ip
-		fi
 		eval TCP_NODE${5}_PORT=$port
 		
 		if [ "$type" == "socks5" ]; then
@@ -397,7 +369,7 @@ gen_start_config() {
 			local server_username=$(config_n_get $node username)
 			local server_password=$(config_n_get $node password)
 			eval port=\$TCP_REDIR_PORT$5
-			ln_start_bin $(find_bin ipt2socks) ipt2socks "-l $port -b 0.0.0.0 -s $node_address -p $socks5_port -R"
+			ln_start_bin $(find_bin ipt2socks) ipt2socks_tcp_$5 "-T -l $port -b 0.0.0.0 -s $node_address -p $node_port -R"
 			
 			# local redsocks_config_file=$CONFIG_PATH/TCP_$i.conf
 			# gen_redsocks_config $redsocks_config_file tcp $port $node_address $socks5_port $server_username $server_password
@@ -420,16 +392,8 @@ gen_start_config() {
 					force_stop
 				fi
 				if [ -n "$kcptun_port" -a -n "$kcptun_config" -a "$lbenabled" == "0" ]; then
-					local run_kcptun_ip=$server_ip
-					if [ -n "$kcptun_server_host" ]; then
-						kcptun_use_ipv6=$(config_n_get $node kcp_use_ipv6)
-						network_type="ipv4"
-						[ "$kcptun_use_ipv6" == "1" ] && network_type="ipv6"
-						kcptun_server_ip=$(get_host_ip $network_type $kcptun_server_host)
-						eval TCP_NODE${5}_IP=$kcptun_server_ip
-						run_kcptun_ip=$kcptun_server_ip
-						echolog "Kcptun节点IP地址:$kcptun_server_ip"
-					fi
+					local run_kcptun_ip=$server_host
+					[ -n "$kcptun_server_host" ] && run_kcptun_ip=$(get_host_ip $network_type $kcptun_server_host)
 					KCPTUN_REDIR_PORT=$(get_not_exists_port_after $KCPTUN_REDIR_PORT udp)
 					ln_start_bin $(config_t_get global_app kcptun_client_file $(find_bin kcptun-client)) kcptun-client "--log $CONFIG_PATH/kcptun_${5}.log -l 0.0.0.0:$KCPTUN_REDIR_PORT -r $run_kcptun_ip:$kcptun_port $kcptun_config"
 				fi
@@ -453,11 +417,23 @@ gen_start_config() {
 					ln_start_bin $(find_bin ss-redir) ss-redir "-c $config_file $plugin_params"
 				done
 			elif [ "$type" == "brook" ]; then
-				[ "$kcptun_use" == "1" ] && {
-					server_ip=127.0.0.1
-					port=$KCPTUN_REDIR_PORT
-				}
-				ln_start_bin $(config_t_get global_app brook_file $(find_bin brook)) brook "tproxy -l 0.0.0.0:$local_port -s $server_ip:$port -p $(config_n_get $node password)"
+				local server_ip=$server_host
+				local protocol=$(config_n_get $node brook_protocol client)
+				local brook_tls=$(config_n_get $node brook_tls 0)
+				if [ "$protocol" == "wsclient" ]; then
+					[ "$brook_tls" == "1" ] && server_ip="wss://${server_ip}" || server_ip="ws://${server_ip}" 
+					socks5_port=$(get_not_exists_port_after $(expr $SOCKS5_PROXY_PORT3 + 3) tcp)
+					ln_start_bin $(config_t_get global_app brook_file $(find_bin brook)) brook_tcp_$5 "wsclient -l 127.0.0.1:$socks5_port -i 127.0.0.1 -s $server_ip:$port -p $(config_n_get $node password)"
+					eval port=\$TCP_REDIR_PORT$5
+					ln_start_bin $(find_bin ipt2socks) ipt2socks_tcp_$5 "-T -l $port -b 0.0.0.0 -s 127.0.0.1 -p $socks5_port -R"
+					echolog "Brook的WebSocket不支持透明代理，将使用ipt2socks转换透明代理！"
+				else
+					[ "$kcptun_use" == "1" ] && {
+						server_ip=127.0.0.1
+						port=$KCPTUN_REDIR_PORT
+					}
+					ln_start_bin $(config_t_get global_app brook_file $(find_bin brook)) brook_tcp_$5 "tproxy -l 0.0.0.0:$local_port -s $server_ip:$port -p $(config_n_get $node password)"
+				fi
 			fi
 		fi
 	fi
@@ -624,7 +600,7 @@ add_dnsmasq() {
 	mkdir -p $TMP_DNSMASQ_PATH $DNSMASQ_PATH /var/dnsmasq.d
 	cat $RULE_PATH/whitelist_host | sed -e "/^$/d" | sed "s/^/ipset=&\/./g" | sed "s/$/\/&whitelist/g" | sort | awk '{if ($0!=line) print;line=$0}' > $TMP_DNSMASQ_PATH/whitelist_host.conf
 
-	local adblock=$(config_t_get global_rules adblock 0)
+	local adblock=$(config_t_get global_rules adblock 1)
 	[ "$adblock" == "1" ] && {
 		[ -f "$RULE_PATH/adblock.conf" -a -s "$RULE_PATH/adblock.conf" ] && ln -s $RULE_PATH/adblock.conf $TMP_DNSMASQ_PATH/adblock.conf
 	}
@@ -636,17 +612,35 @@ add_dnsmasq() {
 		
 		subscribe_proxy=$(config_t_get global_subscribe subscribe_proxy 0)
 		[ "$subscribe_proxy" -eq 1 ] && {
-			config_foreach set_subscribe_proxy "subscribe_list"
+			local count=$(uci show $CONFIG | grep "@subscribe_list" | sed -n '$p' | cut -d '[' -f 2 | cut -d ']' -f 1)
+			[ -n "$count" -a "$count" -ge 0 ] && {
+				u_get() {
+					local ret=$(uci -q get $CONFIG.@subscribe_list[$1].$2)
+					echo ${ret:=$3}
+				}
+				for i in $(seq 0 $count); do
+					local enabled=$(u_get $i enabled 0)
+					[ "$enabled" == "0" ] && continue
+					local url=$(u_get $i url)
+					[ -n "$url" -a "$url" != "" ] && {
+						if [ -n "$(echo -n "$url" | grep "//")" ]; then
+							echo -n "$url" | awk -F'/' '{print $3}' | sed "s/^/server=&\/./g" | sed "s/$/\/127.0.0.1#$DNS_PORT/g" >>$TMP_DNSMASQ_PATH/subscribe.conf
+							echo -n "$url" | awk -F'/' '{print $3}' | sed "s/^/ipset=&\/./g" | sed "s/$/\/router/g" >>$TMP_DNSMASQ_PATH/subscribe.conf
+						else
+							echo -n "$url" | awk -F'/' '{print $1}' | sed "s/^/server=&\/./g" | sed "s/$/\/127.0.0.1#$DNS_PORT/g" >>$TMP_DNSMASQ_PATH/subscribe.conf
+							echo -n "$url" | awk -F'/' '{print $1}' | sed "s/^/ipset=&\/./g" | sed "s/$/\/router/g" >>$TMP_DNSMASQ_PATH/subscribe.conf
+						fi
+					}
+				done
+			}
 		}
 	}
 	
 	[ -z "$IS_DEFAULT_CHINA_DNS" -o "$IS_DEFAULT_CHINA_DNS" == 0 ] && {
 		server="server=127.0.0.1#$DNS_PORT"
 		[ "$DNS_MODE" != "chinadns-ng" ] && {
-			local china_dns1=$(echo $UP_CHINA_DNS | awk -F "," '{print $1}')
-			local china_dns2=$(echo $UP_CHINA_DNS | awk -F "," '{print $2}')
-			[ -n "$china_dns1" ] && server="server=$china_dns1"
-			[ -n "$china_dns2" ] && server="${server}\n${server_2}"
+			[ -n "$UP_CHINA_DNS1" ] && server="server=$UP_CHINA_DNS1"
+			[ -n "$UP_CHINA_DNS2" ] && server="${server}\n${UP_CHINA_DNS2}"
 			server="${server}\nno-resolv"
 		}
 		cat <<-EOF > /var/dnsmasq.d/dnsmasq-$CONFIG.conf
@@ -844,53 +838,62 @@ start_haproxy() {
 				    bind 0.0.0.0:$bport
 				    mode tcp
 			EOF
-			for i in $(seq 0 50); do
-				bips=$(config_t_get balancing lbss '' $i)
-				bports=$(config_t_get balancing lbort '' $i)
-				if [ -z "$bips" ] || [ -z "$bports" ]; then
-					break
-				fi
-				local bip=$(echo $bips | awk -F ":" '{print $1}')
-				local bport=$(echo $bips | awk -F ":" '{print $2}')
-				[ "$bports" != "default" ] && bport=$bports
-				[ -z "$bport" ] && break
-				
-				bweight=$(config_t_get balancing lbweight '' $i)
-				exports=$(config_t_get balancing export '' $i)
-				bbackup=$(config_t_get balancing backup '' $i)
-				if [ "$bbackup" = "1" ]; then
-					bbackup=" backup"
-					echolog "负载均衡：添加故障转移备节点:$bip"
-				else
-					bbackup=""
-					echolog "负载均衡：添加负载均衡主节点:$bip"
-				fi
-				#si=$(echo $bip | grep -E "([0-9]{1,3}[\.]){3}[0-9]{1,3}")
-				#if [ -z "$si" ]; then
-				#	bip=$(resolveip -4 -t 2 $bip | awk 'NR==1{print}')
-				#	if [ -z "$bip" ]; then
-				#		bip=$(nslookup $bip localhost | sed '1,4d' | awk '{print $3}' | grep -v : | awk 'NR==1{print}')
-				#	fi
-				#	echolog "负载均衡${i} IP为：$bip"
-				#fi
-				echo "    server $bip:$bport $bip:$bport weight $bweight check inter 1500 rise 1 fall 3 $bbackup" >> $HAPROXY_FILE
-				if [ "$exports" != "0" ]; then
-					failcount=0
-					while [ "$failcount" -lt "3" ]; do
-						interface=$(ifconfig | grep "$exports" | awk '{print $1}')
-						if [ -z "$interface" ]; then
-							echolog "找不到出口接口：$exports，1分钟后再重试"
-							let "failcount++"
-							[ "$failcount" -ge 3 ] && exit 0
-							sleep 1m
-						else
-							route add -host ${bip} dev ${exports}
-							echo "$bip" >>/tmp/balancing_ip
-							break
-						fi
-					done
-				fi
-			done
+			local count=$(uci show $CONFIG | grep "@balancing" | sed -n '$p' | cut -d '[' -f 2 | cut -d ']' -f 1)
+			[ -n "$count" -a "$count" -ge 0 ] && {
+				u_get() {
+					local ret=$(uci -q get $CONFIG.@balancing[$1].$2)
+					echo ${ret:=$3}
+				}
+				for i in $(seq 0 $count); do
+					enabled=$(u_get $i enabled 0)
+					[ "$enabled" == "0" ] && continue
+					bips=$(u_get $i lbss)
+					bports=$(u_get $i lbort)
+					if [ -z "$bips" ] || [ -z "$bports" ]; then
+						break
+					fi
+					local bip=$(echo $bips | awk -F ":" '{print $1}')
+					local bport=$(echo $bips | awk -F ":" '{print $2}')
+					[ "$bports" != "default" ] && bport=$bports
+					[ -z "$bport" ] && break
+					
+					bweight=$(u_get $i lbweight)
+					exports=$(u_get $i export)
+					bbackup=$(u_get $i backup)
+					if [ "$bbackup" = "1" ]; then
+						bbackup=" backup"
+						echolog "负载均衡：添加故障转移备节点:$bip"
+					else
+						bbackup=""
+						echolog "负载均衡：添加负载均衡主节点:$bip"
+					fi
+					#si=$(echo $bip | grep -E "([0-9]{1,3}[\.]){3}[0-9]{1,3}")
+					#if [ -z "$si" ]; then
+					#	bip=$(resolveip -4 -t 2 $bip | awk 'NR==1{print}')
+					#	if [ -z "$bip" ]; then
+					#		bip=$(nslookup $bip localhost | sed '1,4d' | awk '{print $3}' | grep -v : | awk 'NR==1{print}')
+					#	fi
+					#	echolog "负载均衡${i} IP为：$bip"
+					#fi
+					echo "    server $bip:$bport $bip:$bport weight $bweight check inter 1500 rise 1 fall 3 $bbackup" >> $HAPROXY_FILE
+					if [ "$exports" != "0" ]; then
+						failcount=0
+						while [ "$failcount" -lt "3" ]; do
+							interface=$(ifconfig | grep "$exports" | awk '{print $1}')
+							if [ -z "$interface" ]; then
+								echolog "找不到出口接口：$exports，1分钟后再重试"
+								let "failcount++"
+								[ "$failcount" -ge 3 ] && exit 0
+								sleep 1m
+							else
+								route add -host ${bip} dev ${exports}
+								echo "$bip" >>/tmp/balancing_ip
+								break
+							fi
+						done
+					fi
+				done
+			}
 			#生成负载均衡控制台
 			console_port=$(config_t_get global_haproxy console_port)
 			console_user=$(config_t_get global_haproxy console_user)
